@@ -284,3 +284,13 @@ def bezier_draw(cps, n = 20, red=False):
 
     gl.glEnd()
     gl.glColor3f(1,1,1)
+
+
+def draw_poly(pts, color):
+    from pyglet import gl
+    gl.glBegin(gl.GL_POLYGON)
+    gl.glColor3f(color[0], color[1], color[2])
+    for _, p in enumerate(pts):
+        gl.glVertex3f(*p)
+    gl.glEnd()
+    gl.glColor3f(1, 1, 1)

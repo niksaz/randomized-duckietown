@@ -15,6 +15,10 @@ class DoneRewardInfo:
     reward: float
 
 
+import cv2
+import os
+import json
+
 import gym
 import yaml
 from gym import spaces
@@ -157,6 +161,7 @@ class Simulator(gym.Env):
             user_tile_start=None,
             seed=None,
             distortion=False,
+            data_dir=None,
     ):
         """
 
@@ -175,6 +180,16 @@ class Simulator(gym.Env):
         :param user_tile_start: If None, sample randomly. Otherwise (i,j). Overrides map start tile
         :param seed:
         """
+        self.data_dir = data_dir
+        if data_dir is not None:
+            self.gt_image_dir = os.path.join(data_dir, 'gt_image')
+            self.gt_seg_dir = os.path.join(data_dir, 'gt_seg')
+            self.data_config_path = os.path.join(data_dir, 'config.json')
+            os.makedirs(self.data_dir, exist_ok=True)
+            os.makedirs(self.gt_image_dir, exist_ok=True)
+            os.makedirs(self.gt_seg_dir, exist_ok=True)
+            assert os.path.exists(self.data_config_path)
+
         # first initialize the RNG
         self.seed_value = seed
         self.seed(seed=self.seed_value)
@@ -300,7 +315,7 @@ class Simulator(gym.Env):
 
         self.last_action = np.array([0, 0])
         self.wheelVels = np.array([0, 0])
-        
+
     def _init_vlists(self):
         import pyglet
         # Create the vertex list for our road quad
@@ -375,9 +390,6 @@ class Simulator(gym.Env):
         gl.glLightfv(gl.GL_LIGHT0, gl.GL_POSITION, (gl.GLfloat * 4)(*light_pos))
         gl.glLightfv(gl.GL_LIGHT0, gl.GL_AMBIENT, (gl.GLfloat * 4)(*ambient))
         gl.glLightfv(gl.GL_LIGHT0, gl.GL_DIFFUSE, (gl.GLfloat * 4)(0.5, 0.5, 0.5, 1.0))
-        gl.glEnable(gl.GL_LIGHT0)
-        gl.glEnable(gl.GL_LIGHTING)
-        gl.glEnable(gl.GL_COLOR_MATERIAL)
 
         # Ground color
         self.ground_color = self._perturb(GROUND_COLOR, 0.3)
@@ -965,6 +977,168 @@ class Simulator(gym.Env):
 
         return pts
 
+    def _interpolate_points(self, cpts, ns):
+        assert len(cpts) - 1 == len(ns)
+        pts = [cpts[0]]
+        for pid in range(len(ns)):
+            a = cpts[pid]
+            b = cpts[pid + 1]
+            n = ns[pid]
+            for i in range(1, n+1):
+                new_pt = []
+                for k in range(3):
+                    new_pt.append(a[k] + (b[k]-a[k])*i/n)
+                pts.append(new_pt)
+        return pts
+
+    def _build_polygons_from_sides(self, pts1, pts2):
+        polys = []
+        for i in range(1, len(pts1)):
+            polys.append(np.array([np.array(pts1[i-1]), np.array(pts2[i-1]), np.array(pts2[i]), np.array(pts1[i])]))
+        res = np.array(polys)
+        return res
+
+    def _get_border(self, i, j):
+        """Get the road markings limiting polygons."""
+        road_markings_colors = [[1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.2, 0.2, 0.2]]
+
+        straight_1_left_pts = \
+            self._build_polygons_from_sides(
+                [[0.5, 0, 0.5], [0.5, 0, -0.5]],
+                [[0.4125, 0, 0.5], [0.42, 0, -0.5]])
+        straight_1_left_cls = np.array([road_markings_colors[0]])
+        straight_1_middle_pts = np.concatenate([
+            self._build_polygons_from_sides(
+                [[0.0225, 0, 0.4675], [0.0225, 0, 0.4025]],
+                [[-0.0225, 0, 0.4675], [-0.0225, 0, 0.4025]]),
+            self._build_polygons_from_sides(
+                [[0.025, 0, 0.3725], [0.0275, 0, 0.2975]],
+                [[-0.0225, 0, 0.3725], [-0.0175, 0, 0.295]]),
+            self._build_polygons_from_sides(
+                [[0.0275, 0, 0.2625], [0.03, 0, 0.185]],
+                [[-0.0175, 0, 0.2625], [-0.0125, 0, 0.185]]),
+            self._build_polygons_from_sides(
+                [[0.0325, 0, 0.1525], [0.035, 0, 0.0825]],
+                [[-0.0125, 0, 0.1525], [-0.01, 0, 0.08]]),
+            self._build_polygons_from_sides(
+                [[0.035, 0, 0.0475], [0.0375, 0, -0.03]],
+                [[-0.01, 0, 0.0475], [-0.0075, 0, -0.0325]]),
+            self._build_polygons_from_sides(
+                [[0.0375, 0, -0.065], [0.0375, 0, -0.14]],
+                [[-0.0075, 0, -0.065], [-0.0075, 0, -0.14]]),
+            self._build_polygons_from_sides(
+                [[0.0375, 0, -0.175], [0.0375, 0, -0.25]],
+                [[-0.005, 0, -0.175], [-0.005, 0, -0.25]]),
+            self._build_polygons_from_sides(
+                [[0.04, 0, -0.2875], [0.04, 0, -0.36]],
+                [[-0.005, 0, -0.2875], [-0.0025, 0, -0.3625]]),
+            self._build_polygons_from_sides(
+                [[0.04, 0, -0.3925], [0.04, 0, -0.4625]],
+                [[-0.005, 0, -0.39], [-0.0025, 0, -0.465]])])
+        straight_1_middle_cls = np.array([road_markings_colors[1]] * 9)
+        straight_1_right_pts = \
+            self._build_polygons_from_sides(
+                [[-0.425, 0, 0.5], [-0.425, 0, -0.5]],
+                [[-0.5, 0, 0.5], [-0.5, 0, -0.5]])
+        straight_1_right_cls = np.array([road_markings_colors[0]])
+
+        curve_left_1_left_pts = np.concatenate([
+            self._build_polygons_from_sides(
+                [[0.495, 0, -0.385], [0.405, 0, -0.49]],
+                [[0.5, 0, -0.3925], [0.42, 0, -0.5]]),
+            self._build_polygons_from_sides(
+                [[0.5, 0, -0.3925], [0.42, 0, -0.5]],
+                [[0.5, 0, -0.5], [0.5, 0, -0.5]])])
+        curve_left_1_middle_pts = np.concatenate([
+            self._build_polygons_from_sides(
+                [[0.4825, 0, -0.0025], [0.39, 0, -0.005]],
+                [[0.4825, 0, -0.045], [0.3925, 0, -0.045]]),
+            self._build_polygons_from_sides(
+                [[0.3725, 0, 0.0025], [0.3125, 0, 0.0]],
+                [[0.375, 0, -0.0425], [0.315, 0, -0.04]]),
+            self._build_polygons_from_sides(
+                [[0.2875, 0, 0.0075], [0.2, 0, -0.005]],
+                [[0.2975, 0, -0.0325], [0.2075, 0, -0.045]]),
+            self._build_polygons_from_sides(
+                [[0.165, 0, -0.02], [0.0975, 0, -0.08]],
+                [[0.1925, 0, -0.0475], [0.1275, 0, -0.1075]]),
+            self._build_polygons_from_sides(
+                [[0.07, 0, -0.1175], [0.0275, 0, -0.2]],
+                [[0.1075, 0, -0.1325], [0.065, 0, -0.2175]]),
+            self._build_polygons_from_sides(
+                [[0.01, 0, -0.25], [-0.01, 0, -0.3375]],
+                [[0.05, 0, -0.2575], [0.0275, 0, -0.3425]]),
+            self._build_polygons_from_sides(
+                [[-0.0175, 0, -0.375], [-0.025, 0, -0.4525]],
+                [[0.0225, 0, -0.375], [0.0175, 0, -0.45]]),
+            self._build_polygons_from_sides(
+                [[-0.0225, 0, -0.49], [-0.0225, 0, -0.5]],
+                [[0.0175, 0, -0.49], [0.0175, 0, -0.5]])])
+        curve_left_1_right_pts = np.concatenate([
+            self._build_polygons_from_sides(
+                [[0.5, 0, 0.5], [-0.1075, 0, 0.5]],
+                [[0.5, 0, 0.415], [-0.1075, 0, 0.42]]),
+            self._build_polygons_from_sides(
+                [[-0.1075, 0, 0.4875], [-0.295, 0, 0.405]],
+                [[-0.0525, 0, 0.4225], [-0.2575, 0, 0.3325]]),
+            self._build_polygons_from_sides(
+                [[-0.24, 0, 0.45], [-0.445, 0, 0.255]],
+                [[-0.175, 0, 0.4025], [-0.3775, 0, 0.2025]]),
+            self._build_polygons_from_sides(
+                [[-0.3975, 0, 0.31], [-0.5, 0, 0.065]],
+                [[-0.3175, 0, 0.28], [-0.415, 0, 0.035]]),
+            self._build_polygons_from_sides(
+                [[-0.5, 0, 0.095], [-0.5, 0, -0.4825]],
+                [[-0.4175, 0, 0.095], [-0.4175, 0, -0.4825]]),
+            self._build_polygons_from_sides(
+                [[-0.5, 0, -0.4825], [-0.5, 0, -0.5]],
+                [[-0.4175, 0, -0.4825], [-0.4325, 0, -0.5]])])
+
+        tile = self._get_tile(i, j)
+        assert tile is not None
+
+        kind = tile['kind']
+        angle = tile['angle']
+
+        # Each tile will have a unique set of border points.
+        if kind.startswith('straight'):
+            pts = np.concatenate([straight_1_left_pts, straight_1_middle_pts, straight_1_right_pts])
+            cls = np.concatenate([straight_1_left_cls, straight_1_middle_cls, straight_1_right_cls])
+        elif kind == 'curve_left':
+            pts = np.concatenate([curve_left_1_left_pts, curve_left_1_middle_pts, curve_left_1_right_pts])
+            curve_left_1_left_cls = np.array([road_markings_colors[0]] * 2)
+            curve_left_1_middle_cls = np.array([road_markings_colors[1]] * 8)
+            curve_left_1_right_cls = np.array([road_markings_colors[0]] * 6)
+            cls = np.concatenate([curve_left_1_left_cls, curve_left_1_middle_cls, curve_left_1_right_cls])
+        elif kind == 'curve_right':
+            # right curve is just horizontal flip of the left curve
+            I = np.diag([-1.0, 1.0, 1.0])
+            pts = np.concatenate([curve_left_1_left_pts, curve_left_1_middle_pts, curve_left_1_right_pts]).dot(I)
+            curve_left_1_left_cls = np.array([road_markings_colors[0]] * 2)
+            curve_left_1_middle_cls = np.array([road_markings_colors[1]] * 8)
+            curve_left_1_right_cls = np.array([road_markings_colors[0]] * 6)
+            cls = np.concatenate([curve_left_1_left_cls, curve_left_1_middle_cls, curve_left_1_right_cls])
+        else:
+            assert False, kind
+        grey_pts = \
+            self._build_polygons_from_sides(
+                [[0.5, 0, 0.5], [-0.5, 0, 0.5]],
+                [[0.5, 0, -0.5], [-0.5, 0, -0.5]])
+        grey_cls = np.array([road_markings_colors[-1]])
+
+        pts = np.concatenate([grey_pts, pts])
+        cls = np.concatenate([grey_cls, cls])
+
+        # Scale points according to the tile size
+        pts *= self.road_tile_size
+
+        # Rotate and align each curve with its place in global frame
+        mat = gen_rot_matrix(np.array([0, 1, 0]), angle * math.pi / 2)
+        pts = np.matmul(pts, mat)
+        pts += np.array([(i + 0.5) * self.road_tile_size, 0, (j + 0.5) * self.road_tile_size])
+
+        return pts, cls
+
     def get_dir_vec(self, angle=None):
         """
         Vector pointing in the direction the agent is looking
@@ -1368,6 +1542,10 @@ class Simulator(gym.Env):
         self.shadow_window.switch_to()
 
         from pyglet import gl
+        gl.glEnable(gl.GL_LIGHT0)
+        gl.glEnable(gl.GL_LIGHTING)
+        gl.glEnable(gl.GL_COLOR_MATERIAL)
+
         # Bind the multisampled frame buffer
         gl.glEnable(gl.GL_MULTISAMPLE)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, multi_fbo)
@@ -1560,12 +1738,184 @@ class Simulator(gym.Env):
 
         return img_array
 
+    def _render_ground_img(self, width, height, multi_fbo, final_fbo, img_array, top_down=True):
+        """
+        Render an image of the environment into a frame buffer
+        Produce a numpy RGB array image as output
+        """
+        if not self.graphics:
+            return
+
+        # Switch to the default context
+        # This is necessary on Linux nvidia drivers
+        # pyglet.gl._shadow_window.switch_to()
+        self.shadow_window.switch_to()
+
+        from pyglet import gl
+        gl.glDisable(gl.GL_LIGHT0)
+        gl.glDisable(gl.GL_LIGHTING)
+        gl.glDisable(gl.GL_COLOR_MATERIAL)
+
+        # Bind the multisampled frame buffer
+        gl.glEnable(gl.GL_MULTISAMPLE)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, multi_fbo)
+        gl.glViewport(0, 0, width, height)
+
+        # Clear the color and depth buffers
+
+        gl.glClearColor(0.0, 0.0, 0.0, 1.0)
+        gl.glClearDepth(1.0)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+
+        # Set the projection matrix
+        gl.glMatrixMode(gl.GL_PROJECTION)
+        gl.glLoadIdentity()
+        gl.gluPerspective(
+            self.cam_fov_y,
+            width / float(height),
+            0.04,
+            100.0
+        )
+
+        # Set modelview matrix
+        # Note: we add a bit of noise to the camera position for data augmentation
+        pos = self.cur_pos
+        angle = self.cur_angle
+        logger.info('Pos: %s angle %s' % (self.cur_pos, self.cur_angle))
+        if self.domain_rand:
+            pos = pos + self.randomization_settings['camera_noise']
+
+        x, y, z = pos + self.cam_offset
+        dx, dy, dz = get_dir_vec(angle)
+        gl.glMatrixMode(gl.GL_MODELVIEW)
+        gl.glLoadIdentity()
+
+        if self.draw_bbox:
+            y += 0.8
+            gl.glRotatef(90, 1, 0, 0)
+        elif not top_down:
+            y += self.cam_height
+            gl.glRotatef(self.cam_angle[0], 1, 0, 0)
+            gl.glRotatef(self.cam_angle[1], 0, 1, 0)
+            gl.glRotatef(self.cam_angle[2], 0, 0, 1)
+            gl.glTranslatef(0, 0, self._perturb(CAMERA_FORWARD_DIST))
+
+        if top_down:
+            gl.gluLookAt(
+                # Eye position
+                (self.grid_width * self.road_tile_size) / 2,
+                5,
+                (self.grid_height * self.road_tile_size) / 2,
+                # Target
+                (self.grid_width * self.road_tile_size) / 2,
+                0,
+                (self.grid_height * self.road_tile_size) / 2,
+                # Up vector
+                0, 0, -1.0
+            )
+        else:
+            gl.gluLookAt(
+                # Eye position
+                x,
+                y,
+                z,
+                # Target
+                x + dx,
+                y + dy,
+                z + dz,
+                # Up vector
+                0, 1.0, 0.0
+            )
+
+        # For each grid tile
+        for j in range(self.grid_height):
+            for i in range(self.grid_width):
+                # Get the tile type and angle
+                tile = self._get_tile(i, j)
+
+                if tile is None:
+                    continue
+
+                # kind = tile['kind']
+                angle = tile['angle']
+
+                # Draw marking borders
+                if tile['drivable']:
+                    curve_polys, polys_color = self._get_border(i, j)
+                    is_background_rendered = False
+                    for poly, color in zip(curve_polys, polys_color):
+                        draw_poly(poly, color)
+                        if not is_background_rendered:
+                            is_background_rendered = True
+                            gl.glClearDepth(1.0)
+                            gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
+
+        # Draw the agent's own bounding box
+        if self.draw_bbox:
+            corners = get_agent_corners(pos, angle)
+            gl.glColor3f(1, 0, 0)
+            gl.glBegin(gl.GL_LINE_LOOP)
+            gl.glVertex3f(corners[0, 0], 0.01, corners[0, 1])
+            gl.glVertex3f(corners[1, 0], 0.01, corners[1, 1])
+            gl.glVertex3f(corners[2, 0], 0.01, corners[2, 1])
+            gl.glVertex3f(corners[3, 0], 0.01, corners[3, 1])
+            gl.glEnd()
+
+        if top_down:
+            gl.glPushMatrix()
+            gl.glTranslatef(*self.cur_pos)
+            gl.glScalef(1, 1, 1)
+            gl.glRotatef(self.cur_angle * 180 / np.pi, 0, 1, 0)
+            # glColor3f(*self.color)
+            self.mesh.render()
+            gl.glPopMatrix()
+
+        # Resolve the multisampled frame buffer into the final frame buffer
+        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, multi_fbo)
+        gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, final_fbo)
+        gl.glBlitFramebuffer(
+            0, 0,
+            width, height,
+            0, 0,
+            width, height,
+            gl.GL_COLOR_BUFFER_BIT,
+            gl.GL_LINEAR
+        )
+
+        # Copy the frame buffer contents into a numpy array
+        # Note: glReadPixels reads starting from the lower left corner
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, final_fbo)
+        gl.glReadPixels(
+            0,
+            0,
+            width,
+            height,
+            gl.GL_RGB,
+            gl.GL_UNSIGNED_BYTE,
+            img_array.ctypes.data_as(POINTER(gl.GLubyte))
+        )
+
+        # Unbind the frame buffer
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+
+        # Flip the image because OpenGL maps (0,0) to the lower-left corner
+        # Note: this is necessary for gym.wrappers.Monitor to record videos
+        # properly, otherwise they are vertically inverted.
+        img_array = np.ascontiguousarray(np.flip(img_array, axis=0))
+
+        return img_array
+
+    def _turn_instances_to_binary(self, instance_img):
+        res = instance_img.copy()
+        res_non_black_ids = np.any(res != [0, 0, 0], axis=-1)
+        res[res_non_black_ids] = [255, 255, 255]
+        return res
+
     def render_obs(self):
         """
         Render an observation from the point of view of the agent
         """
-
-        observation = self._render_img(
+        gt_img = self._render_img(
                 self.camera_width,
                 self.camera_height,
                 self.multi_fbo,
@@ -1573,12 +1923,36 @@ class Simulator(gym.Env):
                 self.img_array,
                 top_down=False
         )
+        seg_img = self._render_ground_img(
+            self.camera_width,
+            self.camera_height,
+            self.multi_fbo,
+            self.final_fbo,
+            self.img_array,
+            top_down=False
+        )
 
         # self.undistort - for UndistortWrapper
         if self.distortion and not self.undistort:
-            observation = self.camera_model.distort(observation)
+            gt_img = self.camera_model.distort(gt_img)
+            seg_img = self.camera_model.distort(seg_img)
 
-        return observation
+        if self.data_dir is not None:
+            with open(self.data_config_path, 'r') as infile:
+                dataset_config = json.load(fp=infile)
+            assert dataset_config is not None
+            global_obs_step = dataset_config['size']
+
+            gt_img_path = os.path.join(self.gt_image_dir, f'{global_obs_step}.png')
+            cv2.imwrite(gt_img_path, cv2.cvtColor(gt_img, cv2.COLOR_RGB2BGR))
+            gt_seg_path = os.path.join(self.gt_seg_dir, f'{global_obs_step}.png')
+            cv2.imwrite(gt_seg_path, cv2.cvtColor(seg_img, cv2.COLOR_RGB2GRAY))
+
+            dataset_config['size'] += 1
+            with open(self.data_config_path, 'w') as outfile:
+                json.dump(dataset_config, fp=outfile)
+
+        return gt_img
 
     def render(self, mode='human', close=False):
         """
